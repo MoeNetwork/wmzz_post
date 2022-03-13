@@ -141,7 +141,7 @@ $f = $m->query('SELECT * FROM  `'.DB_NAME.'`.`'.DB_PREFIX.'wmzz_post_data` WHERE
 <br/>
 <div class="alert alert-info">
 	当前已设置 <?php echo $m->num_rows($f); ?> 个要灌水的帖子
-	<?php if($us['lastdo'] != '0000-00-00') echo '，最后一次灌水在 '.$us['lastdo']; ?>，PID 即为 百度账号ID
+	<?php if($us['lastdo'] != '2000-01-01') echo '，最后一次灌水在 '.$us['lastdo']; ?>，PID 即为 百度账号ID
 </div>
 <table class="table table-striped">
 	<thead>
