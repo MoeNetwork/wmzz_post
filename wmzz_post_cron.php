@@ -30,10 +30,10 @@ function wmzz_post_send($uid, $tid, $pid, $water = 'StusGame Tieba Cloud Sign Pl
 		$y .= $key . '=' . $value;
 	}
 	$x['sign'] = strtoupper(md5($y.'tiebaclient!!!'));
-	$c = new wcurl('http://c.tieba.baidu.com/c/c/post/add',array('Content-Type: application/x-www-form-urlencoded'));
+	$c = new wcurl('https://c.tieba.baidu.com/c/c/post/add',array('Content-Type: application/x-www-form-urlencoded'));
 	/* //Note:普通的
 	$x = wmzz_post_gettie($tid,$ck);
-	$c = new wcurl('http://tieba.baidu.com'.$x['__formurl']);
+	$c = new wcurl('https://tieba.baidu.com'.$x['__formurl']);
 	unset($x['__formurl']);
 	$x['co'] = $water;
 	*/
@@ -54,7 +54,7 @@ function wmzz_post_send($uid, $tid, $pid, $water = 'StusGame Tieba Cloud Sign Pl
 }
 
 function wmzz_post_gettie($tid, $ck) {
-	$c = new wcurl('http://tieba.baidu.com/mo/m?kz='.$tid ,array('User-Agent: Chinese Fucking Phone'));
+	$c = new wcurl('https://tieba.baidu.com/mo/m?kz='.$tid ,array('User-Agent: Chinese Fucking Phone'));
 	$c->addcookie('BDUSS='.$ck);
 	$t = $c->exec();
 	preg_match('/<form action=\"(.*?)\" method=\"post\">/', $t , $formurl);
