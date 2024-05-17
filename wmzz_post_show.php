@@ -33,6 +33,7 @@ if (isset($_GET['save'])) {
 	foreach ($tbss as $key => $tbsx) {
 		if (!empty($tbsx) && !empty($pid[$key])) {
 			$np  = str_ireplace('http://tieba.baidu.com/p/', '', $tbsx);
+			$np  = str_ireplace('https://tieba.baidu.com/p/', '', $np);
 			$tes = $m->once_fetch_array("SELECT count(*) AS `c` FROM `".DB_NAME."`.`".DB_PREFIX."wmzz_post_data` WHERE `uid` = '".UID."' AND `pid` = '{$pid[$key]}' AND `url` = '{$np}'");
 			if($tes['c'] <= 0) {
 				$m->query("INSERT INTO `".DB_NAME."`.`".DB_PREFIX."wmzz_post_data` ( `id`,`uid`,`pid`,`url` ) VALUES ( NULL,'".UID."','{$pid[$key]}','{$np}' );");
@@ -53,7 +54,7 @@ loadhead();
 	$content = '';
 	$tbss = $m->query("SELECT * FROM `".DB_PREFIX."wmzz_post_data` WHERE `uid` = '".UID."';");
 	while ($valux = $m->fetch_array($tbss)) {
-		$tbs .= '<tr><td><input type="text" class="form-control" name="tieba[]" style="width:100%" value="http://tieba.baidu.com/p/'.$valux['url'].'" readonly></td><td><input type="text" name="pid[]" value="'.$valux['pid'].'" class="form-control" readonly></td><td><a class="btn btn-default" title="删除" href="index.php?plugin=wmzz_post&mod=set&del='.$valux['id'].'"><b>X</b></a></td></tr>';
+		$tbs .= '<tr><td><input type="text" class="form-control" name="tieba[]" style="width:100%" value="https://tieba.baidu.com/p/'.$valux['url'].'" readonly></td><td><input type="text" name="pid[]" value="'.$valux['pid'].'" class="form-control" readonly></td><td><a class="btn btn-default" title="删除" href="index.php?plugin=wmzz_post&mod=set&del='.$valux['id'].'"><b>X</b></a></td></tr>';
 	}
 	$tbs = trim($tbs,"\n");
 	$val = unserialize($us['cont']);
@@ -162,7 +163,7 @@ $f = $m->query('SELECT * FROM  `'.DB_NAME.'`.`'.DB_PREFIX.'wmzz_post_data` WHERE
 			$stat = '<font color="red">失败</font>';
 			$err = '，#'.$x['status'].' : '.$x['msg'];
 		}
-		echo '<tr><td>'.$x['pid'].'</td><td><a href="http://tieba.baidu.com/p/'.$x['url'].'" target="_blank">'.$x['url'].'</td><td>'.$x['remain'].' 贴</td><td>'.$stat.$err.'</td></tr>';
+		echo '<tr><td>'.$x['pid'].'</td><td><a href="https://tieba.baidu.com/p/'.$x['url'].'" target="_blank">'.$x['url'].'</td><td>'.$x['remain'].' 贴</td><td>'.$stat.$err.'</td></tr>';
 	}
 	?>
 	</tbody>
