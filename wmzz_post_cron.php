@@ -9,7 +9,7 @@ require_once dirname(__FILE__) . '/wmzz_post_func.php';
  * 规则：
  *   1. 每日补额：某用户 lastdo != 今天 时，其所有目标的 remain 重置为该用户的 num。
  *   2. 只有【贴吧接口明确返回成功】才扣减 remain 一次；失败 remain 不动。
- *   3. 每次成功回帖后，该目标至少间隔 minint 分钟（默认 5，+轻微随机）才允许下一条自动回帖。
+ *   3. 每次成功回帖后的下一次自动回帖间隔 = 用户设置的 x（wmzz_post.gap，秒）+ 随机 1~3 分钟（60~180 秒，精确到秒，每次都重新随机）。
  *   4. 失败后目标退避并计入当日连续失败；连续失败 3 次当天不再重试。
  *   5. 与手动“测试回帖”完全隔离：测试不经过本函数、不扣 remain。
  */
@@ -27,9 +27,6 @@ function cron_wmzz_post()
 	$rem    = (isset($set['rem']) && intval($set['rem']) > 0) ? intval($set['rem']) : 1;
 	$sleep  = isset($set['sleep']) ? intval($set['sleep']) : 0;
 	$device = (isset($set['device']) && in_array(intval($set['device']), array(1, 2, 4))) ? intval($set['device']) : 2;
-	// 最小回帖间隔（分钟）。默认 5；可在插件配置里用 minint 覆盖（0 或缺失按 5 处理）。
-	// 每次成功回帖后重新掷一次随机间隔（minint ~ 2×minint 分钟），保证每次间隔都不一样。
-	$minint = (isset($set['minint']) && intval($set['minint']) > 0) ? intval($set['minint']) : 5;
 
 	$did_refill = false;
 
@@ -93,10 +90,11 @@ function cron_wmzz_post()
 		if (isset($res['status']) && $res['status'] == '1') {
 			// 只有接口确认成功才扣额
 			$newremain = max(0, $remain_before - 1);
-			// 每次成功回帖后独立随机下一次间隔：minint ~ 2×minint 分钟，每次都不一样（默认 5~10 分钟）
-			$gap = $minint * 60 + mt_rand(0, $minint * 60);
+			// 下一次间隔 = 用户设置的 x 秒(gap) + 随机 60~180 秒(1~3 分钟，精确到秒)，每次都重新随机
+			$gbase = isset($u['gap']) ? max(0, intval($u['gap'])) : 0;
+			$gap   = $gbase + mt_rand(60, 180);
 			$m->query('UPDATE `' . DB_NAME . '`.`' . DB_PREFIX . 'wmzz_post_data` SET `remain` = ' . $newremain . ', `status` = 1, `msg` = \'\', `try_ts` = ' . ($now + $gap) . ', `fails` = 0 WHERE `id` = ' . $xid);
-			wmzz_log("wmzz_post success uid={$xu} tid={$x['url']} remain={$newremain} next_gap=" . round($gap / 60, 1) . "m");
+			wmzz_log("wmzz_post success uid={$xu} tid={$x['url']} remain={$newremain} next_gap={$gap}s(base={$gbase}s+rand)");
 			$ok_cnt++;
 		} else {
 			// 失败：remain 不扣，记录真实错误；连续失败 3 次则当天不再重试，避免反复空打接口

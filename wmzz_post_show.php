@@ -92,6 +92,11 @@ if (isset($_GET['save'])) {
 	$kws  = isset($_POST['kw'])    ? $_POST['kw']    : array();
 	$pid  = isset($_POST['pid'])   ? $_POST['pid']   : array();
 	$num  = isset($_POST['num'])   ? intval($_POST['num']) : 0;
+	$gapsec = 0;
+	if (isset($_POST['gap'])) {
+		$gapmin = floatval($_POST['gap']);
+		$gapsec = intval(round(($gapmin > 0 ? $gapmin : 0) * 60)); // 用户输入为分钟，换算成秒存储
+	}
 	$conx = isset($_POST['content']) ? strip_tags($_POST['content']) : '';
 	if (empty($conx)) {
 		$wsc = isset($set['defcont']) ? $set['defcont'] : '';
@@ -143,7 +148,7 @@ if (isset($_GET['save'])) {
 	$prevnum = (empty($us) || empty($us['num'])) ? 0 : intval($us['num']);
 	$lastdo  = (empty($us) || empty($us['lastdo'])) ? '2000-01-01' : $us['lastdo'];
 	$today   = date('Y-m-d');
-	$m->query('INSERT INTO `' . DB_NAME . '`.`' . DB_PREFIX . 'wmzz_post` (`uid`, `cont`, `num`) VALUES (' . UID . ', \'' . addslashes($wsc) . '\', \'' . $num . '\') on duplicate key update `cont` = \'' . addslashes($wsc) . '\', `num` = \'' . $num . '\'');
+	$m->query('INSERT INTO `' . DB_NAME . '`.`' . DB_PREFIX . 'wmzz_post` (`uid`, `cont`, `num`, `gap`) VALUES (' . UID . ', \'' . addslashes($wsc) . '\', \'' . $num . '\', \'' . $gapsec . '\') on duplicate key update `cont` = \'' . addslashes($wsc) . '\', `num` = \'' . $num . '\', `gap` = \'' . $gapsec . '\'');
 	if ($num <= 0) {
 		// 0 = 停用：清空今日剩余（已发过的不受影响），明天也不会自动补
 		$m->query('UPDATE `' . DB_NAME . '`.`' . DB_PREFIX . 'wmzz_post_data` SET `remain` = 0, `try_ts` = 0, `fails` = 0 WHERE `uid` = ' . UID);
@@ -240,6 +245,8 @@ loadhead();
 echo '<h2>贴吧帖子云灌水</h2>';
 $usnum = (empty($us) || empty($us['num'])) ? 0 : intval($us['num']);
 $uslastdo = (empty($us) || empty($us['lastdo'])) ? '2000-01-01' : $us['lastdo'];
+$usgapsec = (empty($us) || empty($us['gap'])) ? 0 : intval($us['gap']);
+$usgapmin = round($usgapsec / 60, 1);
 
 if (SYSTEM_PAGE == 'set') {
 	$tbs = '';
@@ -316,6 +323,13 @@ if (SYSTEM_PAGE == 'set') {
 			<br/><small>修改规则：今天还没开始 → 立即给足新数量；今天已开始且调大 → 只补差额；调小 → 砍到新上限内。改数量只改额度，不会自动触发回帖。</small>
 		</td>
 	</tr>
+	<tr>
+		<td>两次回帖间隔（分钟）＝ 固定的 x<br/>每次实际间隔 = x + 随机 1~3 分钟<br/>随机部分精确到秒，每次都不同</td>
+		<td>
+			<input type="number" min="0" step="0.5" name="gap" class="form-control" value="<?php echo $usgapmin ?>">
+			<br/><small>设 0 = 只随机 1~3 分钟；设 2 = 约 3~5 分钟之间随机；设 5 = 约 6~8 分钟之间随机。只影响自动回帖节奏，不影响“测试回帖”。</small>
+		</td>
+	</tr>
 	</tbody>
 	</table>
 	<?php if (ISVIP == false && (!empty($set['max']) || !empty($set['cmax']) || !empty($set['lmax']))) {
@@ -343,7 +357,7 @@ if (SYSTEM_PAGE == 'set') {
 	?>
 	<br/>
 	<div class="alert alert-info">
-		当前已设置 <?php echo $m->num_rows($f); ?> 个灌水目标；每天每目标上限 <b><?php echo $usnum; ?></b> 次
+		当前已设置 <?php echo $m->num_rows($f); ?> 个灌水目标；每天每目标上限 <b><?php echo $usnum; ?></b> 次；两次回帖间隔 <b><?php echo $usgapmin; ?></b> 分钟 + 随机 1~3 分钟
 		<?php if ($uslastdo != '2000-01-01') echo '，今日额度初始化于 ' . $uslastdo; ?>
 		（每天跨天自动补额；自动任务由系统每分钟调度执行；失败不扣次数，仅显示真实错误）
 	</div>

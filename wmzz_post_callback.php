@@ -10,9 +10,10 @@ function callback_init() {
 `uid`  int(255) NOT NULL ,
 `cont`  text CHARACTER SET utf8 COLLATE utf8_general_ci NULL ,
 `num`  int(255) NULL DEFAULT NULL ,
+`gap`  int(11) NOT NULL DEFAULT 0 ,
 `lastdo`  date NOT NULL DEFAULT '2000-01-01' ,
 PRIMARY KEY (`id`, `uid`),
-UNIQUE INDEX `uid` (`uid`) USING BTREE 
+UNIQUE INDEX `uid` (`uid`) USING BTREE
 )
 ENGINE=MyISAM
 DEFAULT CHARACTER SET=utf8 COLLATE=utf8_general_ci

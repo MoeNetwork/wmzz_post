@@ -47,6 +47,9 @@ function wmzz_ensure_schema()
 	@$m->query("ALTER TABLE {$t} ADD COLUMN IF NOT EXISTS `fails` int(11) NOT NULL DEFAULT 0");
 	@$m->query("ALTER TABLE {$t} ADD COLUMN IF NOT EXISTS `kw` varchar(64) CHARACTER SET utf8 COLLATE utf8_general_ci NULL DEFAULT NULL");
 	@$m->query("ALTER TABLE {$t} ADD COLUMN IF NOT EXISTS `fid` bigint(20) NOT NULL DEFAULT 0");
+	// 每用户基础间隔（秒）：wmzz_post.gap，供 cron 计算“x 分钟 + 随机 1~3 分钟”的两次回帖间隔
+	$tu = '`' . DB_NAME . '`.`' . DB_PREFIX . 'wmzz_post`';
+	@$m->query("ALTER TABLE {$tu} ADD COLUMN IF NOT EXISTS `gap` int(11) NOT NULL DEFAULT 0");
 }
 
 /**
