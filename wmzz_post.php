@@ -9,7 +9,9 @@ Author Email: kenvix@vip.qq.com
 Author URL: http://zhizhe8.net
 For: V3.4+
 */
-if (!defined('SYSTEM_ROOT')) { die('Insufficient Permissions'); } 
+if (!defined('SYSTEM_ROOT')) { die('Insufficient Permissions'); }
+
+require_once dirname(__FILE__) . '/wmzz_post_func.php';
 
 function wmzz_post_addaction_navi() {
 	?>

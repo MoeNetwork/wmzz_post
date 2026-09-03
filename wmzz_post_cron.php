@@ -1,126 +1,112 @@
 <?php
-if (!defined('SYSTEM_ROOT')) { die('Insufficient Permissions'); } 
+if (!defined('SYSTEM_ROOT')) { die('Insufficient Permissions'); }
 
-function wmzz_post_send($uid, $tid, $pid, $water = 'StusGame Tieba Cloud Sign Plugin "wmzz_post"', $device = 4) {
-	if (empty($uid) || empty($tid) || empty($pid)) {
-		return array(
-			'status' => '1',
-			'msg'    => ''
-		);
-	}
-	$ck = misc::GetCookie($pid);
-	$xs = wmzz_post_gettie($tid,$ck);
-	$x = array(
-		'BDUSS' => $ck,
-		'_client_id' => 'wappc_136' . rand_int(10) . '_' . rand_int(3),
-		'_client_type' => $device,
-		'_client_version' => '5.0.0',
-		'_phone_imei' => md5(rand_int(16)),
-		'anonymous' => '0',
-		'content' => $water,
-		'fid' => $xs['fid'],
-		'kw' => $xs['word'],
-		'net_type' => '3',
-		'tbs' => $xs['tbs'],
-		'tid' => $tid,
-		'title' => '' 
-	);
-	$y = '';
-	foreach ( $x as $key => $value ) {
-		$y .= $key . '=' . $value;
-	}
-	$x['sign'] = strtoupper(md5($y.'tiebaclient!!!'));
-	$c = new wcurl('https://c.tieba.baidu.com/c/c/post/add',array('Content-Type: application/x-www-form-urlencoded'));
-	/* //Note:普通的
-	$x = wmzz_post_gettie($tid,$ck);
-	$c = new wcurl('https://tieba.baidu.com'.$x['__formurl']);
-	unset($x['__formurl']);
-	$x['co'] = $water;
-	*/
-	$c->addcookie('BDUSS='.$ck);
-	$return = json_decode($c->post($x),true);
-	$c->close();
-	if (!empty($return['error_code']) && $return['error_code'] != '1') {
-		return array(
-			'status' => $return['error_code'],
-			'msg'    => $return['error_msg']
-		);
-	} else {
-		return array(
-			'status' => '1',
-			'msg'    => ''
-		);
-	}
-}
+require_once dirname(__FILE__) . '/wmzz_post_func.php';
 
-function wmzz_post_gettie($tid, $ck) {
-	$c = new wcurl('https://tieba.baidu.com/mo/m?kz='.$tid ,array('User-Agent: Chinese Fucking Phone'));
-	$c->addcookie('BDUSS='.$ck);
-	$t = $c->exec();
-	preg_match('/<form action=\"(.*?)\" method=\"post\">/', $t , $formurl);
-	preg_match('/<input type=\"hidden\" name=\"ti\" value=\"(.*?)\"\/>/', $t, $ti);
-	preg_match('/<input type=\"hidden\" name=\"src\" value=\"(.*?)\"\/>/', $t, $src);
-	preg_match('/<input type=\"hidden\" name=\"word\" value=\"(.*?)\"\/>/', $t, $word);
-	preg_match('/<input type=\"hidden\" name=\"tbs\" value=\"(.*?)\"\/>/', $t, $tbs);
-	preg_match('/<input type=\"hidden\" name=\"fid\" value=\"(.*?)\"\/>/', $t, $fid);
-	preg_match('/<input type=\"hidden\" name=\"z\" value=\"(.*?)\"\/>/', $t, $z);
-	preg_match('/<input type=\"hidden\" name=\"floor\" value=\"(.*?)\"\/>/', $t, $floor);
-	return array(
-		'__formurl' => $formurl[1],
-		'co'        => '',
-		'ti'        => $ti[1],
-		'src'       => $src[1],
-		'word'      => $word[1],
-		'tbs'       => $tbs[1],
-		'ifpost'    => '1',
-		'ifposta'   => '0',
-		'post_info' => '0',
-		'tn'        => 'baiduWiseSubmit',
-		'fid'       => $fid[1],
-		'verify'    => '',
-		'verify_2'  => '',
-		'pinf'      => '1_2_0',
-		'pic_info'  => '',
-		'z'         => $z[1],
-		'last'      => '0',
-		'pn'        => '0',
-		'r'         => '0',
-		'see_lz'    => '0',
-		'no_post_pic' => '0',
-		'floor'     => $floor[1],
-		'sub1'      => '回贴'
-	);
-}
-
-function cron_wmzz_post() {
+/**
+ * 自动灌水计划任务。
+ * 调度来源：云签到 do.php -> cron::runall()（系统 crontab 每分钟执行一次 php do.php）。
+ * 规则：
+ *   1. 每日补额：某用户 lastdo != 今天 时，其所有目标的 remain 重置为该用户的 num。
+ *   2. 只有【贴吧接口明确返回成功】才扣减 remain 一次；失败 remain 不动。
+ *   3. 失败后目标进入 300 秒退避(try_ts)，避免每分钟对同一目标狂刷。
+ *   4. 与手动“测试回帖”完全隔离：测试不经过本函数、不扣 remain。
+ */
+function cron_wmzz_post()
+{
 	global $m;
+	wmzz_ensure_schema();
+	$now   = time();
+	$today = date('Y-m-d');
+
 	$set = unserialize(option::get('plugin_wmzz_post'));
-	$today = date("Y-m-d");
-	//准备：扫描wmzz_post表中lastdo不是今天的，然后更新wmzz_post_data表的remain
-	$sy = $m->query("SELECT * FROM `".DB_PREFIX."wmzz_post` WHERE `lastdo` != '{$today}';");
+	if (!is_array($set)) {
+		$set = array();
+	}
+	$rem    = (isset($set['rem']) && intval($set['rem']) > 0) ? intval($set['rem']) : 1;
+	$sleep  = isset($set['sleep']) ? intval($set['sleep']) : 0;
+	$device = (isset($set['device']) && in_array(intval($set['device']), array(1, 2, 4))) ? intval($set['device']) : 2;
+
+	$did_refill = false;
+
+	// ---- 1) 每日补额：跨天 / 首次配置立即生效 ----
+	$sy = $m->query("SELECT `uid`,`num` FROM `" . DB_PREFIX . "wmzz_post` WHERE `lastdo` != '{$today}';");
 	while ($sx = $m->fetch_array($sy)) {
-		$m->query('UPDATE `'.DB_NAME.'`.`'.DB_PREFIX.'wmzz_post_data` SET `remain` = \''.$sx['num'].'\' WHERE `uid` = '.$sx['uid']);
-		$m->query('UPDATE `'.DB_NAME.'`.`'.DB_PREFIX.'wmzz_post` SET `lastdo` = \''.$today.'\' WHERE `uid` = '.$sx['uid']);
+		$u = intval($sx['uid']);
+		$n = intval($sx['num']);
+		$m->query('UPDATE `' . DB_NAME . '`.`' . DB_PREFIX . 'wmzz_post_data` SET `remain` = ' . $n . ', `try_ts` = 0, `fails` = 0, `status` = 0, `msg` = \'\' WHERE `uid` = ' . $u);
+		$m->query('UPDATE `' . DB_NAME . '`.`' . DB_PREFIX . 'wmzz_post` SET `lastdo` = \'' . $today . '\' WHERE `uid` = ' . $u);
+		wmzz_log("wmzz_post cron refill uid={$u} remain={$n}");
+		$did_refill = true;
 	}
-	//开始：计划任务
-	$count = $m->once_fetch_array("SELECT COUNT(*) AS `c` FROM `".DB_PREFIX."wmzz_post_data` WHERE `remain` > '0' LIMIT {$set['rem']};");
-	if ($count['c'] == $set['rem']) {
-		$y = rand_row(DB_PREFIX.'wmzz_post_data','id', $set['rem'] ,"`remain` > '0'");
-	} else {
-		$y = rand_row(DB_PREFIX.'wmzz_post_data','id', $count['c'] ,"`remain` > '0'");
+
+	// ---- 2) 领取今日仍有额度、且不在退避期内的目标 ----
+	$count = $m->once_fetch_array("SELECT COUNT(*) AS `c` FROM `" . DB_PREFIX . "wmzz_post_data` WHERE `remain` > 0 AND `try_ts` <= {$now};");
+	$need  = isset($count['c']) ? intval($count['c']) : 0;
+	if ($need > $rem) {
+		$need = $rem;
 	}
-	//如果只有一条记录的兼容方案
-	if (isset($y['url'])) {
+	if ($need <= 0) {
+		if ($did_refill) {
+			wmzz_log('wmzz_post cron end (refilled; no target with remaining quota)');
+		}
+		return null;
+	}
+
+	wmzz_log("wmzz_post cron start targets={$need}");
+	$y = rand_row(DB_PREFIX . 'wmzz_post_data', 'id', $need, "`remain` > 0 AND `try_ts` <= {$now}");
+	if (isset($y['url'])) { // 只有一条记录的兼容方案
 		$y = array(0 => $y);
 	}
+	$ok_cnt = 0;
+	$fail_cnt = 0;
 	foreach ($y as $x) {
-		if (!empty($x['pid']) && !empty($x['uid'])) {
-			$u      = $m->once_fetch_array("SELECT * FROM `".DB_PREFIX."wmzz_post` WHERE `uid` = '{$x['uid']}'");
-			$cont   = unserialize($u['cont']);
-			$remain = $x['remain'] - 1 ;
-			$res = wmzz_post_send($x['uid'] , $x['url'] , $x['pid'] , rand_array($cont) , $set['device']);
-			$m->query('UPDATE `'.DB_NAME.'`.`'.DB_PREFIX.'wmzz_post_data` SET `remain` = \'' . $remain . '\',`status` = \''.$res['status'].'\',`msg` = \''.$res['msg'].'\' WHERE `url` = \''.$x['url'].'\' AND `uid` = '.$x['uid']);
-			sleep($set['sleep']);
+		$xid = intval($x['id']);
+		$xu  = intval($x['uid']);
+		if (empty($x['pid']) || empty($xu)) {
+			continue;
+		}
+		// 抢占：避免并行进程对同一目标重复发送（置 try_ts 为将来，谁先置谁处理）
+		$claim = $now + 600;
+		$m->query('UPDATE `' . DB_NAME . '`.`' . DB_PREFIX . 'wmzz_post_data` SET `try_ts` = ' . $claim . ' WHERE `id` = ' . $xid . ' AND `remain` > 0 AND `try_ts` <= ' . $now);
+		$chk = $m->once_fetch_array('SELECT `try_ts` FROM `' . DB_PREFIX . 'wmzz_post_data` WHERE `id` = ' . $xid);
+		if (!isset($chk['try_ts']) || $chk['try_ts'] != $claim) {
+			wmzz_log("wmzz_post skip concurrent uid={$xu} id={$xid}");
+			continue;
+		}
+
+		$u    = $m->once_fetch_array("SELECT * FROM `" . DB_PREFIX . "wmzz_post` WHERE `uid` = '{$xu}'");
+		$cont = (isset($u['cont']) && $u['cont'] !== '') ? @unserialize($u['cont']) : array();
+		if (empty($cont) || !is_array($cont) || empty(trim(implode('', $cont)))) {
+			$cont = array('+3');
+		}
+		$content      = rand_array($cont);
+		$remain_before = intval($x['remain']);
+
+		wmzz_log("wmzz_post sending uid={$xu} tid={$x['url']} remain={$remain_before}");
+		$res = wmzz_post_send($xu, $x['url'], $x['pid'], $content, $device, $x['kw'], intval($x['fid']));
+
+		if (isset($res['status']) && $res['status'] == '1') {
+			// 只有接口确认成功才扣额
+			$newremain = max(0, $remain_before - 1);
+			$m->query('UPDATE `' . DB_NAME . '`.`' . DB_PREFIX . 'wmzz_post_data` SET `remain` = ' . $newremain . ', `status` = 1, `msg` = \'\', `try_ts` = 0, `fails` = 0 WHERE `id` = ' . $xid);
+			wmzz_log("wmzz_post success uid={$xu} tid={$x['url']} remain={$newremain}");
+			$ok_cnt++;
+		} else {
+			// 失败：remain 不扣，记录真实错误；连续失败 3 次则当天不再重试，避免反复空打接口
+			$code = (string)(isset($res['status']) ? $res['status'] : '-1');
+			$err  = (string)(isset($res['msg']) ? $res['msg'] : '发送失败');
+			$scode  = is_numeric($code) ? intval($code) : -1;
+			$fails  = (isset($x['fails']) ? intval($x['fails']) : 0) + 1;
+			$next   = ($fails >= 3) ? (strtotime($today . ' 23:59:59') + 60) : ($now + 300);
+			$m->query('UPDATE `' . DB_NAME . '`.`' . DB_PREFIX . 'wmzz_post_data` SET `status` = ' . $scode . ', `msg` = \'' . addslashes($err) . '\', `try_ts` = ' . $next . ', `fails` = ' . $fails . ' WHERE `id` = ' . $xid);
+			wmzz_log("wmzz_post send failed uid={$xu} tid={$x['url']} code={$code} err={$err} remain unchanged={$remain_before} attempts={$fails}/3");
+			$fail_cnt++;
+		}
+		if ($sleep > 0) {
+			sleep($sleep);
 		}
 	}
+	wmzz_log("wmzz_post cron end ok={$ok_cnt} fail={$fail_cnt}");
+	return null;
 }
