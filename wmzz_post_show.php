@@ -131,7 +131,9 @@ if (isset($_GET['save'])) {
 		$fid = wmzz_findfid(UID, $kw);
 		$ex = $m->once_fetch_array("SELECT `id` FROM `" . DB_NAME . "`.`" . DB_PREFIX . "wmzz_post_data` WHERE `uid` = '" . UID . "' AND `pid` = '{$pk}' AND `url` = '{$np}' LIMIT 1");
 		if (empty($ex['id'])) {
-			$m->query("INSERT INTO `" . DB_NAME . "`.`" . DB_PREFIX . "wmzz_post_data` (`uid`, `pid`, `url`, `kw`, `fid`, `status`, `msg`) VALUES ('" . UID . "','{$pk}','{$np}','" . addslashes($kw) . "','{$fid}', 0, '待执行')");
+			// 新增目标：当天直接给足当前 num 的额度（num=0 即停用）；只给额度、不触发发送
+			$nmsg = ($num > 0) ? '待执行' : '数量为0，未启用';
+			$m->query("INSERT INTO `" . DB_NAME . "`.`" . DB_PREFIX . "wmzz_post_data` (`uid`, `pid`, `url`, `kw`, `fid`, `status`, `msg`, `remain`) VALUES ('" . UID . "','{$pk}','{$np}','" . addslashes($kw) . "','{$fid}', 0, '" . addslashes($nmsg) . "', " . $num . ")");
 		} else {
 			$m->query("UPDATE `" . DB_NAME . "`.`" . DB_PREFIX . "wmzz_post_data` SET `url` = '{$np}', `kw` = '" . addslashes($kw) . "', `fid` = '{$fid}' WHERE `id` = '" . intval($ex['id']) . "'");
 		}
