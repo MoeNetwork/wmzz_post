@@ -28,8 +28,8 @@ function cron_wmzz_post()
 	$sleep  = isset($set['sleep']) ? intval($set['sleep']) : 0;
 	$device = (isset($set['device']) && in_array(intval($set['device']), array(1, 2, 4))) ? intval($set['device']) : 2;
 	// 最小回帖间隔（分钟）。默认 5；可在插件配置里用 minint 覆盖（0 或缺失按 5 处理）。
+	// 每次成功回帖后重新掷一次随机间隔（minint ~ 2×minint 分钟），保证每次间隔都不一样。
 	$minint = (isset($set['minint']) && intval($set['minint']) > 0) ? intval($set['minint']) : 5;
-	$pace   = $minint * 60 + mt_rand(0, 60); // 每次成功后的下一次可自动回帖时间（秒），带轻微随机避免绝对周期
 
 	$did_refill = false;
 
@@ -93,9 +93,10 @@ function cron_wmzz_post()
 		if (isset($res['status']) && $res['status'] == '1') {
 			// 只有接口确认成功才扣额
 			$newremain = max(0, $remain_before - 1);
-			// 成功后按最小间隔限速：本目标下次自动回帖至少等 pace 秒之后
-			$m->query('UPDATE `' . DB_NAME . '`.`' . DB_PREFIX . 'wmzz_post_data` SET `remain` = ' . $newremain . ', `status` = 1, `msg` = \'\', `try_ts` = ' . ($now + $pace) . ', `fails` = 0 WHERE `id` = ' . $xid);
-			wmzz_log("wmzz_post success uid={$xu} tid={$x['url']} remain={$newremain} next_min={$minint}m");
+			// 每次成功回帖后独立随机下一次间隔：minint ~ 2×minint 分钟，每次都不一样（默认 5~10 分钟）
+			$gap = $minint * 60 + mt_rand(0, $minint * 60);
+			$m->query('UPDATE `' . DB_NAME . '`.`' . DB_PREFIX . 'wmzz_post_data` SET `remain` = ' . $newremain . ', `status` = 1, `msg` = \'\', `try_ts` = ' . ($now + $gap) . ', `fails` = 0 WHERE `id` = ' . $xid);
+			wmzz_log("wmzz_post success uid={$xu} tid={$x['url']} remain={$newremain} next_gap=" . round($gap / 60, 1) . "m");
 			$ok_cnt++;
 		} else {
 			// 失败：remain 不扣，记录真实错误；连续失败 3 次则当天不再重试，避免反复空打接口
