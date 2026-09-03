@@ -152,8 +152,9 @@ if (isset($_GET['save'])) {
 		$m->query('UPDATE `' . DB_NAME . '`.`' . DB_PREFIX . 'wmzz_post_data` SET `remain` = ' . $num . ', `try_ts` = 0, `fails` = 0 WHERE `uid` = ' . UID);
 		$m->query('UPDATE `' . DB_NAME . '`.`' . DB_PREFIX . 'wmzz_post` SET `lastdo` = \'' . $today . '\' WHERE `uid` = ' . UID);
 	} elseif ($num > $prevnum) {
-		// 今天已启动并调大数量 → 按差额补足，并解除此前的失败退避（用户主动加额视为想再试）
-		$m->query('UPDATE `' . DB_NAME . '`.`' . DB_PREFIX . 'wmzz_post_data` SET `remain` = LEAST(`remain` + ' . ($num - $prevnum) . ', ' . $num . '), `try_ts` = 0, `fails` = 0 WHERE `uid` = ' . UID);
+		// 今天已启动并调大数量 → 按差额补足；成功间隔中(status=1)的目标保持限速不变，
+		// 仅在失败停摆时才解除退避重试（用户主动加额视为想再试）；只改额度、不触发发送
+		$m->query('UPDATE `' . DB_NAME . '`.`' . DB_PREFIX . 'wmzz_post_data` SET `remain` = LEAST(`remain` + ' . ($num - $prevnum) . ', ' . $num . '), `fails` = 0, `try_ts` = IF(`status` = 1, `try_ts`, 0) WHERE `uid` = ' . UID);
 	} elseif ($num < $prevnum) {
 		// 调小数量 → 只把剩余砍到新上限以内（已发过的不可能撤回）
 		$m->query('UPDATE `' . DB_NAME . '`.`' . DB_PREFIX . 'wmzz_post_data` SET `remain` = LEAST(`remain`, ' . $num . ') WHERE `uid` = ' . UID);
@@ -218,11 +219,20 @@ if (SYSTEM_PAGE == 'reset') {
 		msg('参数错误');
 	}
 	$num = (empty($us) || empty($us['num'])) ? 0 : intval($us['num']);
-	if ($num <= 0) {
-		$m->query('UPDATE `' . DB_NAME . '`.`' . DB_PREFIX . 'wmzz_post_data` SET `remain` = 0, `try_ts` = 0, `fails` = 0, `status` = 0, `msg` = \'数量为0，未启用\' WHERE `id` = ' . $id . ' AND `uid` = ' . UID);
-	} else {
-		$m->query('UPDATE `' . DB_NAME . '`.`' . DB_PREFIX . 'wmzz_post_data` SET `remain` = ' . $num . ', `try_ts` = 0, `fails` = 0, `status` = 0, `msg` = \'今日额度已重置，剩余 ' . $num . ' 次\' WHERE `id` = ' . $id . ' AND `uid` = ' . UID);
+	$r2 = $m->once_fetch_array("SELECT `status` FROM `" . DB_PREFIX . "wmzz_post_data` WHERE `id` = {$id} AND `uid` = " . UID);
+	if (empty($r2)) {
+		msg('记录不存在或无权操作');
 	}
+	// 上次是成功(status=1)且正在 5 分钟限速中的目标：保持限速，不在重置后立刻再发；仅失败/停摆才解锁
+	$was_pace = (isset($r2['status']) && trim((string)$r2['status']) == '1');
+	if ($num <= 0) {
+		$setsql = '`remain` = 0, `try_ts` = 0, `fails` = 0, `status` = 0, `msg` = \'数量为0，未启用\'';
+	} elseif ($was_pace) {
+		$setsql = '`remain` = ' . $num . ', `fails` = 0, `status` = 0, `msg` = \'今日额度已重置，剩余 ' . $num . ' 次\'';
+	} else {
+		$setsql = '`remain` = ' . $num . ', `try_ts` = 0, `fails` = 0, `status` = 0, `msg` = \'今日额度已重置，剩余 ' . $num . ' 次\'';
+	}
+	$m->query('UPDATE `' . DB_NAME . '`.`' . DB_PREFIX . 'wmzz_post_data` SET ' . $setsql . ' WHERE `id` = ' . $id . ' AND `uid` = ' . UID);
 	ReDirect(SYSTEM_URL . 'index.php?plugin=wmzz_post&resetok=1');
 }
 
