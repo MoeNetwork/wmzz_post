@@ -228,7 +228,7 @@ if (SYSTEM_PAGE == 'reset') {
 	if (empty($r2)) {
 		msg('记录不存在或无权操作');
 	}
-	// 上次是成功(status=1)且正在 5 分钟限速中的目标：保持限速，不在重置后立刻再发；仅失败/停摆才解锁
+	// 上次是成功(status=1)且仍在随机间隔中的目标：保持限速，不在重置后立刻再发；仅失败/停摆才解锁
 	$was_pace = (isset($r2['status']) && trim((string)$r2['status']) == '1');
 	if ($num <= 0) {
 		$setsql = '`remain` = 0, `try_ts` = 0, `fails` = 0, `status` = 0, `msg` = \'数量为0，未启用\'';
@@ -247,6 +247,9 @@ $usnum = (empty($us) || empty($us['num'])) ? 0 : intval($us['num']);
 $uslastdo = (empty($us) || empty($us['lastdo'])) ? '2000-01-01' : $us['lastdo'];
 $usgapsec = (empty($us) || empty($us['gap'])) ? 0 : intval($us['gap']);
 $usgapmin = round($usgapsec / 60, 1);
+// 管理员后台设定的随机间隔区间（未配置时给出默认 1~3 分钟）
+$rngcfg = wmzz_interval_range($set);
+$rngtxt = wmzz_range_text($rngcfg);
 
 if (SYSTEM_PAGE == 'set') {
 	$tbs = '';
@@ -317,17 +320,17 @@ if (SYSTEM_PAGE == 'set') {
 		</td>
 	</tr>
 	<tr>
-		<td>每天每个帖子的灌水数量（每日真实回帖上限）<br/>0 为不灌水<br/><br/><small>注意：这不是管理员后台的“单次计划任务灌水数量”（那个只决定每次调度处理几个目标）。每天最多回帖数由本处决定。</small></td>
+		<td>每天每个帖子的灌水数量（每日真实回帖上限）<br/>0 为不灌水<br/><br/><small>每天最多回帖数由本处决定；数量到账后按“两次回帖间隔”一条一条自动发送。</small></td>
 		<td>
 			<input type="number" min="0" step="1" name="num" class="form-control" value="<?php echo $usnum ?>">
 			<br/><small>修改规则：今天还没开始 → 立即给足新数量；今天已开始且调大 → 只补差额；调小 → 砍到新上限内。改数量只改额度，不会自动触发回帖。</small>
 		</td>
 	</tr>
 	<tr>
-		<td>两次回帖间隔（分钟）＝ 固定的 x<br/>每次实际间隔 = x + 随机 1~3 分钟<br/>随机部分精确到秒，每次都不同</td>
+		<td>两次回帖间隔：固定的 X 分钟（可选底数）<br/>实际每次间隔 = X 分钟 + 管理员后台设置的随机区间<br/>随机部分每次都不同</td>
 		<td>
 			<input type="number" min="0" step="0.5" name="gap" class="form-control" value="<?php echo $usgapmin ?>">
-			<br/><small>设 0 = 只随机 1~3 分钟；设 2 = 约 3~5 分钟之间随机；设 5 = 约 6~8 分钟之间随机。只影响自动回帖节奏，不影响“测试回帖”。</small>
+			<br/><small>设 0 = 只按管理员后台的随机区间走（推荐）；设 2 = 每次都额外加 2 分钟。只影响自动回帖节奏，不影响“测试回帖”。</small>
 		</td>
 	</tr>
 	</tbody>
@@ -357,9 +360,9 @@ if (SYSTEM_PAGE == 'set') {
 	?>
 	<br/>
 	<div class="alert alert-info">
-		当前已设置 <?php echo $m->num_rows($f); ?> 个灌水目标；每天每目标上限 <b><?php echo $usnum; ?></b> 次；两次回帖间隔 <b><?php echo $usgapmin; ?></b> 分钟 + 随机 1~3 分钟
+		当前已设置 <?php echo $m->num_rows($f); ?> 个灌水目标；每天每目标上限 <b><?php echo $usnum; ?></b> 次；两次回帖间隔 = 固定 <b><?php echo $usgapmin; ?></b> 分钟 + <b><?php echo $rngtxt; ?></b>
 		<?php if ($uslastdo != '2000-01-01') echo '，今日额度初始化于 ' . $uslastdo; ?>
-		（每天跨天自动补额；自动任务由系统每分钟调度执行；失败不扣次数，仅显示真实错误）
+		（每天跨天自动补额；自动任务一次一条、由系统每分钟调度执行；失败不扣次数，仅显示真实错误）
 	</div>
 	<table class="table table-striped">
 		<thead>

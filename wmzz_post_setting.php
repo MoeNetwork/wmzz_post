@@ -10,6 +10,13 @@ if (isset($_GET['ok'])) {
 if (empty($s['device'])) {
 	$s['device'] = 4;
 }
+// 新版用区间 sleep_min/sleep_max；旧版单值 sleep 仅用于历史停顿，展示时留空由用户按新区间填写
+if (!isset($s['sleep_min'])) {
+	$s['sleep_min'] = '';
+}
+if (!isset($s['sleep_max'])) {
+	$s['sleep_max'] = '';
+}
 ?>
 <h3>贴吧帖子云灌水 - 管理</h3><br/>
 <form action="setting.php?mod=plugin:wmzz_post" method="post">
@@ -22,9 +29,13 @@ if (empty($s['device'])) {
 	</thead>
 	<tbody>
 		<tr>
-			<td>发帖时间间隔<br/>0 为无间隔，单位为秒。设置间隔可避免发帖过快及验证码的问题，但是可能会导致程序超时</td>
+			<td>发帖时间间隔（秒）<br/>填一个区间：每条自动回帖后会随机等这个区间内的秒数，再发下一条，每次都不同，像真人慢慢盖楼。<br/>两边都留空或填 0 = 使用默认随机 1~3 分钟（防刷）。<br/>填同一个数 = 固定间隔。<br/><small>注：系统每 1 分钟检查一次，间隔会按分钟凑整生效（如填 100~300 秒，实际约 2~5 分钟随机）。账号自身设置的“固定 X 分钟”会叠加在此之上。</small></td>
 			<td>
-				<input type="number" min="0" step="1" class="form-control" name="sleep" value="<?php echo $s['sleep'] ?>" required>
+				<div>
+					<input type="number" min="0" step="1" class="form-control" style="display:inline-block;width:44%" name="sleep_min" value="<?php echo htmlspecialchars($s['sleep_min'], ENT_QUOTES); ?>" placeholder="最小（例：100）">
+					<span style="display:inline-block;width:8%;text-align:center"> ~ </span>
+					<input type="number" min="0" step="1" class="form-control" style="display:inline-block;width:44%" name="sleep_max" value="<?php echo htmlspecialchars($s['sleep_max'], ENT_QUOTES); ?>" placeholder="最大（例：300）">
+				</div>
 			</td>
 		</tr>
 		<tr>
@@ -43,12 +54,6 @@ if (empty($s['device'])) {
 			<td>用户最大总灌水量<br/>0 为无限，计算公式： 设置的帖子数 x 每个帖子的灌水数量 = 总灌水量</td>
 			<td>
 				<input type="number" min="0" step="1" class="form-control" name="max" value="<?php echo $s['max'] ?>" required>
-			</td>
-		</tr>
-		<tr>
-			<td>单次计划任务灌水数量<br/>设置执行一次计划任务为多少个帖子灌水，至少为 1</td>
-			<td>
-				<input type="number" min="1" step="1" class="form-control" name="rem" value="<?php echo $s['rem'] ?>" required>
 			</td>
 		</tr>
 		<tr>
