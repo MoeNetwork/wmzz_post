@@ -10,9 +10,10 @@ function callback_init() {
 `uid`  int(255) NOT NULL ,
 `cont`  text CHARACTER SET utf8 COLLATE utf8_general_ci NULL ,
 `num`  int(255) NULL DEFAULT NULL ,
+`gap`  int(11) NOT NULL DEFAULT 0 ,
 `lastdo`  date NOT NULL DEFAULT '2000-01-01' ,
 PRIMARY KEY (`id`, `uid`),
-UNIQUE INDEX `uid` (`uid`) USING BTREE 
+UNIQUE INDEX `uid` (`uid`) USING BTREE
 )
 ENGINE=MyISAM
 DEFAULT CHARACTER SET=utf8 COLLATE=utf8_general_ci
@@ -25,9 +26,14 @@ DELAY_KEY_WRITE=0
 `uid`  int(255) NOT NULL DEFAULT 0 ,
 `pid`  int(255) NOT NULL DEFAULT 0 ,
 `url`  varchar(255) CHARACTER SET utf8 COLLATE utf8_general_ci NOT NULL ,
+`kw`  varchar(64) CHARACTER SET utf8 COLLATE utf8_general_ci NULL DEFAULT NULL ,
+`fid`  bigint(20) NOT NULL DEFAULT 0 ,
 `status`  int(10) NOT NULL DEFAULT 0 ,
 `msg`  varchar(400) CHARACTER SET utf8 COLLATE utf8_general_ci NULL DEFAULT NULL ,
 `remain`  int(255) NOT NULL DEFAULT 0 ,
+`try_ts`  int(11) unsigned NOT NULL DEFAULT 0 ,
+`test_at` int(11) unsigned NOT NULL DEFAULT 0 ,
+`fails`   int(11) NOT NULL DEFAULT 0 ,
 PRIMARY KEY (`id`)
 )
 ENGINE=MyISAM
