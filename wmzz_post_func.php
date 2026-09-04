@@ -192,44 +192,31 @@ function wmzz_range_text($range)
 }
 
 /**
- * 把“今天仍有额度、已到期、但本轮没有处理”的目标，各自重排到“该账号固定底数 gap + 随机区间”之后的时刻。
- * 这样全局始终一次只回一条，且每条之间隔着随机间隔，互不扎堆。
- * @param int $except_id 本轮已处理的目标 id，跳过它
- * @param int $now       当前时间戳
- * @param int $rmin      随机区间最小值(秒)
- * @param int $rmax      随机区间最大值(秒)
- * @return int 被重排的目标数
+ * 读取全局“下次允许发包”时间戳（单位：秒）。
+ * 用于把所有帖子的回帖串成同一条真人节奏：任何两个帖子的回帖之间也必须隔开随机间隔。
+ * 返回 0 表示当前无约束（可立即发包）。存储于 options 表，跨分钟、跨进程持久。
+ * @return int unix 秒
  */
-function wmzz_reschedule_due($except_id, $now, $rmin, $rmax)
+function wmzz_gate_read()
 {
 	global $m;
-	$rows = array();
-	$uids = array();
-	$q = $m->query('SELECT `id`, `uid` FROM `' . DB_PREFIX . 'wmzz_post_data` WHERE `remain` > 0 AND `try_ts` <= ' . intval($now) . ' AND `id` <> ' . intval($except_id));
-	if ($q) {
-		while ($o = $m->fetch_array($q)) {
-			$rows[] = array('id' => intval($o['id']), 'uid' => intval($o['uid']));
-			$uids[intval($o['uid'])] = true;
-		}
-	}
-	if (empty($rows)) {
+	if (!is_object($m)) {
 		return 0;
 	}
-	// 预取每个账号的固定底数(gap，秒)
-	$gapmap = array();
-	$idlist = implode(',', array_keys($uids));
-	$gu = $m->query('SELECT `uid`, `gap` FROM `' . DB_PREFIX . 'wmzz_post` WHERE `uid` IN (' . $idlist . ')');
-	if ($gu) {
-		while ($g = $m->fetch_array($gu)) {
-			$gapmap[intval($g['uid'])] = intval($g['gap']);
-		}
+	$q = $m->once_fetch_array("SELECT `value` FROM `" . DB_PREFIX . "options` WHERE `name` = 'wmzz_post_gate' LIMIT 1;");
+	return (empty($q) || !isset($q['value'])) ? 0 : intval($q['value']);
+}
+
+/**
+ * 写入全局“下次允许发包”时间戳。
+ * @param int $ts unix 秒；0 表示清除限制
+ */
+function wmzz_gate_write($ts)
+{
+	global $m;
+	if (!is_object($m)) {
+		return;
 	}
-	$n = 0;
-	foreach ($rows as $o) {
-		$base = isset($gapmap[$o['uid']]) ? $gapmap[$o['uid']] : 0;
-		$d    = $base + mt_rand($rmin, $rmax);
-		$m->query('UPDATE `' . DB_NAME . '`.`' . DB_PREFIX . 'wmzz_post_data` SET `try_ts` = ' . ($now + $d) . ' WHERE `id` = ' . $o['id'] . ' AND `remain` > 0 AND `try_ts` <= ' . $now);
-		$n++;
-	}
-	return $n;
+	$ts = max(0, intval($ts));
+	@$m->query("INSERT INTO `" . DB_PREFIX . "options` (`name`, `value`) VALUES ('wmzz_post_gate', '{$ts}') ON DUPLICATE KEY UPDATE `value` = '{$ts}';");
 }
