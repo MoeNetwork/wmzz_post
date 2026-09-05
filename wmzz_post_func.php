@@ -68,6 +68,10 @@ function wmzz_ensure_schema()
 	// 每用户基础间隔（秒）：wmzz_post.gap，供 cron 计算“固定底数 gap + 后台随机区间”的两次回帖间隔
 	$tu = '`' . DB_NAME . '`.`' . DB_PREFIX . 'wmzz_post`';
 	@$m->query("ALTER TABLE {$tu} ADD COLUMN IF NOT EXISTS `gap` int(11) NOT NULL DEFAULT 0");
+	// 升级本插件默认文本列为 utf8mb4：支持 emoji 表情存储/发送（幂等；utf8mb4 是 utf8 超集，兼容老数据）
+	@$m->query("ALTER TABLE {$tu} MODIFY `cont` text CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci");
+	@$m->query("ALTER TABLE {$t} MODIFY `kw` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL");
+	@$m->query("ALTER TABLE {$t} MODIFY `msg` varchar(400) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL");
 }
 
 /**
