@@ -194,7 +194,7 @@ if (SYSTEM_PAGE == 'test') {
 	if (empty($cont) || !is_array($cont) || empty(trim(implode('', $cont)))) {
 		$cont = array('+3');
 	}
-	$device = (isset($set['device']) && in_array(intval($set['device']), array(1, 2, 4))) ? intval($set['device']) : 2;
+	$device = (isset($set['device']) && in_array(intval($set['device']), array(1, 2, 3, 4))) ? intval($set['device']) : 4;
 	$res = wmzz_post_send(UID, $row['url'], $row['pid'], rand_array($cont), $device, $row['kw'], intval($row['fid']));
 	$code = (string)(isset($res['status']) ? $res['status'] : '-1');
 	$err  = (string)(isset($res['msg']) ? $res['msg'] : '');
@@ -213,6 +213,8 @@ if (SYSTEM_PAGE == 'test') {
 	}
 	// 写入“最近状态/错误信息”，方便直接看到真实结果；不影响 remain/num/lastdo
 	$m->query('UPDATE `' . DB_NAME . '`.`' . DB_PREFIX . 'wmzz_post_data` SET `status` = ' . $scode . ', `msg` = \'' . addslashes($txt) . '\' WHERE `id` = ' . $id);
+	$chName = isset($res['channel']) ? (string)$res['channel'] : '-';
+	wmzz_log('wmzz_post manual-test uid=' . UID . ' tid=' . $row['url'] . ' ch=' . $chName . ' => ' . ($ok ? 'success' : 'fail: ' . $txt));
 	echo json_encode(array('ok' => $ok, 'msg' => $txt, 'code' => $code, 'error' => $err));
 	die;
 }
@@ -239,6 +241,68 @@ if (SYSTEM_PAGE == 'reset') {
 	}
 	$m->query('UPDATE `' . DB_NAME . '`.`' . DB_PREFIX . 'wmzz_post_data` SET ' . $setsql . ' WHERE `id` = ' . $id . ' AND `uid` = ' . UID);
 	ReDirect(SYSTEM_URL . 'index.php?plugin=wmzz_post&resetok=1');
+}
+
+// ---------- 手动设置“剩余灌水数”（仅手动触发，不超每日上限 num） ----------
+if (SYSTEM_PAGE == 'setremain') {
+	$id = isset($_GET['id']) ? intval($_GET['id']) : 0;
+	$v  = isset($_GET['remain']) ? intval($_GET['remain']) : -1;
+	$num = (empty($us) || empty($us['num'])) ? 0 : intval($us['num']);
+	if ($id <= 0 || $v < 0) {
+		msg('参数错误');
+	}
+	$row2 = $m->once_fetch_array("SELECT id FROM `" . DB_PREFIX . "wmzz_post_data` WHERE `id` = {$id} AND `uid` = " . UID);
+	if (empty($row2)) {
+		msg('记录不存在或无权操作');
+	}
+	if ($num <= 0) {
+		msg('该账号“每天每个帖子的灌水数量”为 0（已停用）。请先在程序设置里设置数量，再来手动给额度');
+	}
+	$nv = min(max($v, 0), $num); // 不超出每日上限
+	$m->query('UPDATE `' . DB_NAME . '`.`' . DB_PREFIX . 'wmzz_post_data` SET `remain` = ' . $nv . ', `try_ts` = 0, `fails` = 0, `status` = 0, `msg` = \'手动设置剩余 ' . $nv . ' 次\' WHERE `id` = ' . $id . ' AND `uid` = ' . UID);
+	wmzz_log('wmzz_post manual remain uid=' . UID . ' id=' . $id . ' => ' . $nv);
+	ReDirect(SYSTEM_URL . 'index.php?plugin=wmzz_post&setok=1');
+}
+
+// ---------- 运行日志查看（只读显示 wmzz_post_cron.log 最近 400 行） ----------
+if (SYSTEM_PAGE == 'log') {
+	loadhead();
+	echo '<h2>贴吧帖子云灌水 - 运行日志</h2>';
+	echo '<ul class="nav nav-tabs">'
+		. '<li><a href="index.php?plugin=wmzz_post">灌水日志</a></li>'
+		. '<li class="active"><a href="index.php?plugin=wmzz_post&mod=log">运行日志</a></li>'
+		. '<li><a href="index.php?plugin=wmzz_post&mod=set">程序设置</a></li>'
+		. '</ul><br/>';
+	echo '<div class="alert alert-info">自动任务与手动测试的运行记录（服务器插件目录 wmzz_post_cron.log）。每天跨天会自动补额并清除上一日的退避等待；success 一行的 ch= 表示走的通道（web=网页端，client:2/4…=客户端类型）。</div>';
+	echo '<label style="font-weight:normal;margin:0 12px 6px 0;"><input type="checkbox" id="wmzzAutoScroll"> 自动滚动到最新（每 6 秒自动刷新并停在底部，选择会被记住）</label>';
+	$logf = dirname(__FILE__) . '/wmzz_post_cron.log';
+	$lines = array();
+	if (is_readable($logf)) {
+		$raw = @file_get_contents($logf);
+		if ($raw !== false) {
+			$lines = explode("\n", $raw);
+			$lines = array_slice($lines, -400);
+		}
+	}
+	echo '<pre id="wmzzLog" style="max-height:620px;overflow:auto;background:#f7f7f7;border:1px solid #ddd;padding:8px;font-size:12px;">'
+		. htmlspecialchars(implode("\n", $lines), ENT_QUOTES) . '</pre>';
+	echo '<br/><a class="btn btn-default" href="index.php?plugin=wmzz_post&mod=log">刷新</a>';
+	echo '<script type="text/javascript">
+(function(){
+  var box = document.getElementById("wmzzAutoScroll");
+  var pre = document.getElementById("wmzzLog");
+  function on(){ try{ return localStorage.getItem("wmzz_autoscroll") === "1"; }catch(e){ return false; } }
+  function save(v){ try{ localStorage.setItem("wmzz_autoscroll", v ? "1" : "0"); }catch(e){} }
+  if (box) { box.checked = on(); }
+  if (box && box.checked) {
+    if (pre) { pre.scrollTop = pre.scrollHeight; }
+    setInterval(function(){ location.reload(); }, 6000);
+  }
+  if (box) { box.addEventListener("change", function(){ save(box.checked); location.reload(); }); }
+})();
+</script>';
+	loadfoot();
+	die;
 }
 
 loadhead();
@@ -277,6 +341,7 @@ if (SYSTEM_PAGE == 'set') {
 	?>
 	<ul class="nav nav-tabs">
 	  <li><a href="index.php?plugin=wmzz_post">灌水日志</a></li>
+	  <li><a href="index.php?plugin=wmzz_post&mod=log">运行日志</a></li>
 	  <li class="active"><a href="#">程序设置</a></li>
 	</ul>
 	<?php
@@ -350,11 +415,15 @@ if (SYSTEM_PAGE == 'set') {
 	<?php } else { ?>
 	<ul class="nav nav-tabs">
 		  <li class="active"><a href="#">灌水日志</a></li>
+		  <li><a href="index.php?plugin=wmzz_post&mod=log">运行日志</a></li>
 		  <li><a href="index.php?plugin=wmzz_post&mod=set">程序设置</a></li>
 		</ul>
 	<?php
 	if (isset($_GET['resetok'])) {
 		echo '<br/><div class="alert alert-success">今日额度已重置，剩余数量见下表；额度到账后由自动任务在下一分钟内发送。</div>';
+	}
+	if (isset($_GET['setok'])) {
+		echo '<br/><div class="alert alert-success">剩余灌水数已更新。注意：每天零点后会自动重置为“每天数量”，手动值不会保留到第二天。</div>';
 	}
 	$f = $m->query('SELECT * FROM `' . DB_NAME . '`.`' . DB_PREFIX . 'wmzz_post_data` WHERE `uid` = ' . UID . '');
 	?>
@@ -362,18 +431,18 @@ if (SYSTEM_PAGE == 'set') {
 	<div class="alert alert-info">
 		当前已设置 <?php echo $m->num_rows($f); ?> 个灌水目标；每天每目标上限 <b><?php echo $usnum; ?></b> 次；两次回帖间隔 = 固定 <b><?php echo $usgapmin; ?></b> 分钟 + <b><?php echo $rngtxt; ?></b>
 		<?php if ($uslastdo != '2000-01-01') echo '，今日额度初始化于 ' . $uslastdo; ?>
-		（每天跨天自动补额；自动任务一次一条、由系统每分钟调度执行；失败不扣次数，仅显示真实错误）
+		（每天跨天自动补额并把“剩余”重置为“每天数量”；剩余可手动修改，仅当天有效；自动任务一次一条、由系统每分钟调度执行；失败不扣次数）
 	</div>
 	<table class="table table-striped">
 		<thead>
 			<tr>
-				<th>PID</th>
-				<th style="width:18%">帖子ID</th>
-				<th style="width:12%">贴吧</th>
-				<th style="width:8%">每日数量</th>
-				<th style="width:10%">剩余灌水数</th>
-				<th style="width:26%">最近状态/错误信息</th>
-				<th style="width:18%">操作</th>
+				<th style="white-space:nowrap">PID</th>
+				<th style="width:15%;white-space:nowrap">帖子ID</th>
+				<th style="width:10%;white-space:nowrap">贴吧</th>
+				<th style="width:8%;white-space:nowrap">每日数量</th>
+				<th style="width:13%;white-space:nowrap">剩余灌水数</th>
+				<th>最近状态/错误信息</th>
+				<th style="white-space:nowrap">操作</th>
 			</tr>
 		</thead>
 		<tbody>
@@ -386,7 +455,7 @@ if (SYSTEM_PAGE == 'set') {
 				. '<td><a href="https://tieba.baidu.com/p/' . htmlspecialchars($x['url'], ENT_QUOTES) . '" target="_blank">' . htmlspecialchars($x['url'], ENT_QUOTES) . '</a></td>'
 				. '<td>' . htmlspecialchars($x['kw'], ENT_QUOTES) . '</td>'
 				. '<td>' . $usnum . '</td>'
-				. '<td class="wmzz-remain">' . intval($x['remain']) . '</td>'
+				. '<td><input type="number" min="0" max="' . max(0, $usnum) . '" step="1" class="form-control input-sm wmzz-remain-in" data-id="' . $xid . '" value="' . intval($x['remain']) . '" style="width:72px" title="直接改数字、离开输入框即自动保存（仅当天有效）"></td>'
 				. '<td class="wmzz-status">' . $stathtml . '</td>'
 				. '<td>'
 				. '<button type="button" class="btn btn-primary btn-xs wmzz-test-btn" data-id="' . $xid . '">测试回帖</button> '
@@ -419,7 +488,28 @@ if (SYSTEM_PAGE == 'set') {
 		});
 	});
 	</script>
+	<script type="text/javascript">
+	$(function () {
+		// “剩余灌水数”：直接改数字、离开输入框即自动保存（实时）
+		$('.wmzz-remain-in').on('change', function () {
+			var $inp = $(this);
+			var v = parseInt($inp.val(), 10);
+			if (isNaN(v) || v < 0) {
+				$inp.val($inp.data('last') !== undefined ? $inp.data('last') : 0);
+				return;
+			}
+			$inp.data('last', v);
+			$.get('index.php?plugin=wmzz_post&mod=setremain&id=' + encodeURIComponent($inp.data('id')) + '&remain=' + v)
+				.done(function () {
+					$inp.css({ 'border-color': '#5cb85c', 'box-shadow': '0 0 0 0.2rem rgba(92,184,92,.25)' });
+					setTimeout(function () { $inp.css({ 'border-color': '', 'box-shadow': '' }); }, 1200);
+				})
+				.fail(function () { $inp.css('border-color', '#d9534f'); });
+		});
+	});
+	</script>
 	<?php } ?>
-	<br/><br/>注：只保留最后一次的状态；每天的数量在零点后由自动任务补足；“测试回帖”不消耗每日次数、不计入自动任务。
+	<br/><br/>注：只保留最后一次的状态；每天的数量在零点后由自动任务补足；“测试回帖”不消耗每日次数、不计入自动任务；剩余灌水数可直接改数字、离开输入框即自动保存（仅当天有效）。
+	<br/><br/>运行记录可在上方“运行日志”页查看（自动任务 + 手动测试都会写入）。
 	<br/><br/>贴吧云灌水 [ 精准回帖版 ] V2.5-fix | 百度贴吧云签到
 	<?php loadfoot(); ?>

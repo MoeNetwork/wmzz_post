@@ -28,6 +28,24 @@ function wmzz_log($line)
 }
 
 /**
+ * 记录一次发帖接口的完整原始响应（排查 3250026 / 224011 等错误用），自动轮转。
+ * 只记录响应，不记录请求内容（不含任何 Cookie/密码等敏感字段）。
+ * @param int    $http HTTP 状态码
+ * @param string $raw  接口返回的原始文本
+ */
+function wmzz_resp_log($http, $raw)
+{
+	$file = dirname(__FILE__) . '/wmzz_post_resp.log';
+	$head = '[' . date('Y-m-d H:i:s') . '] http=' . intval($http);
+	$text = $head . PHP_EOL . $raw . PHP_EOL;
+	if (file_exists($file) && @filesize($file) > 512 * 1024) {
+		@file_put_contents($file, $text, LOCK_EX); // 超限后重置文件
+		return;
+	}
+	@file_put_contents($file, $text, FILE_APPEND | LOCK_EX);
+}
+
+/**
  * 确保表结构包含运行所需新列（幂等，兼容老版本表）
  */
 function wmzz_ensure_schema()
@@ -50,23 +68,32 @@ function wmzz_ensure_schema()
 	// 每用户基础间隔（秒）：wmzz_post.gap，供 cron 计算“固定底数 gap + 后台随机区间”的两次回帖间隔
 	$tu = '`' . DB_NAME . '`.`' . DB_PREFIX . 'wmzz_post`';
 	@$m->query("ALTER TABLE {$tu} ADD COLUMN IF NOT EXISTS `gap` int(11) NOT NULL DEFAULT 0");
+	// 升级本插件默认文本列为 utf8mb4：支持 emoji 表情存储/发送（幂等；utf8mb4 是 utf8 超集，兼容老数据）
+	@$m->query("ALTER TABLE {$tu} MODIFY `cont` text CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci");
+	@$m->query("ALTER TABLE {$t} MODIFY `kw` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL");
+	@$m->query("ALTER TABLE {$t} MODIFY `msg` varchar(400) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL");
 }
 
 /**
- * 对指定帖子发送一条回复
- * 通道：https://tieba.baidu.com/c/c/post/add
- * 说明：旧版本通过手机网页版解析帖子参数再发帖，网页通道已被贴吧风控/下线，
- *       此处改为直接调用主域客户端接口(已实测可成功发送)，参数经 ksort + tiebaclient!!! 签名。
+ * 对指定帖子发送一条回复（多通道自动切换：一端不行就换另一端）。
+ * 通道顺序（首个成功即停，一次最多成功一条）：
+ *   0. 网页(电脑/浏览器)端 f/commit/post/add —— 需要 STOKEN；账号在客户端接口触发风控(AI 验证码 224011)时，
+ *      实测网页端同一账号无需验证码即可成功。
+ *   1. 客户端接口 c/c/post/add，_client_type 依次轮询：配置的首选 device → 4(Windows/Wap) → 2(Android)
+ *      → 1(iPhone) → 3(WindowsPhone)。
+ *      说明：type 3/4 并非“永久废弃”——正常账号状态可正常发帖；仅在被风控后贴吧对旧类型返回
+ *      “请升级到最新版本”(3250026)，此时换 type2/网页端通常可发，因此全部端都纳入自动切换。
+ * 注意：旧的“每天每帖”/“每小时上限”/退避等仍由调度（cron）负责，本函数只负责把一条发出去。
  * @param int    $uid    云签到用户ID
  * @param string $tid    目标帖子ID
- * @param int    $pid    百度账号ID(用于取 BDUSS)
+ * @param int    $pid    百度账号ID(用于取 BDUSS/STOKEN)
  * @param string $water  回复内容
- * @param int    $device 客户端类型(1=iPhone 2=Android 4=Windows)，默认 Android
+ * @param int    $device 首选客户端类型(1=iPhone 2=Android 3=WindowsPhone 4=Windows/Wap)，之后自动轮询其余类型
  * @param string $kw     目标帖子所属贴吧名(不带"吧")
  * @param int    $fid    贴吧ID，0 表示自动解析
- * @return array  ['status'=>'1' 成功；其他=错误码/'err'，'msg'=>说明]
+ * @return array  ['status'=>'1' 成功；其他=错误码/'err'，'msg'=>说明, 'refused'=>bool, 'channel'=>string, 'tried'=>string]
  */
-function wmzz_post_send($uid, $tid, $pid, $water = '', $device = 2, $kw = '', $fid = 0)
+function wmzz_post_send($uid, $tid, $pid, $water = '', $device = 4, $kw = '', $fid = 0)
 {
 	if (empty($uid) || empty($tid) || empty($pid)) {
 		return array('status' => '-1', 'msg' => '缺少必要参数(uid/tid/pid)');
@@ -100,12 +127,74 @@ function wmzz_post_send($uid, $tid, $pid, $water = '', $device = 2, $kw = '', $f
 	if (empty($tbs)) {
 		return array('status' => '-1', 'msg' => '获取tbs失败，百度账号可能已失效');
 	}
-	// 3. 构造请求参数并签名
+	// 3. 组装通道顺序，逐个尝试，首个成功即停
+	$cs = misc::getCookie($pid, true);
+	$stoken = (is_array($cs) && !empty($cs['stoken'])) ? (string)$cs['stoken'] : '';
+
+	$order = array();
+	if ($stoken !== '') {
+		$order[] = 'web';
+	}
+	$dev = in_array(intval($device), array(1, 2, 3, 4)) ? intval($device) : 4;
+	$types = array();
+	foreach (array($dev, 4, 2, 1, 3) as $t) {
+		if (!in_array($t, $types, true)) {
+			$types[] = $t; // 去重且保持“首选在前”
+		}
+	}
+	foreach ($types as $t) {
+		$order[] = 'client:' . $t;
+	}
+
+	$last    = null;
+	$refused = false;
+	$tried   = array();
+	foreach ($order as $ch) {
+		if ($ch === 'web') {
+			$r = wmzz_post_send_web($ck, $stoken, $kw, $fid, $tbs, $tid, $water);
+		} else {
+			$r = wmzz_post_send_client($ck, $fid, $tbs, $kw, $tid, $water, (int)substr($ch, 7));
+		}
+		$r['channel'] = $ch;
+		$code = isset($r['status']) ? (string)$r['status'] : '-1';
+		$tried[] = $ch . '=>' . ($code === '1' ? 'ok' : $code); // 记录每次通道尝试，便于日志/页面查看
+		$last = $r;
+		if (!empty($r['refused'])) {
+			$refused = true; // 只要任一端被接口明确拒绝，整次就视为“被拒”
+		}
+		if ($code === '1') {
+			$r['tried'] = implode(' | ', $tried); // 任一端成功即成功
+			return $r;
+		}
+	}
+	$triedStr = implode(' | ', $tried);
+	if (!is_array($last)) {
+		return array('status' => '-1', 'msg' => '没有可用发帖通道', 'refused' => $refused, 'tried' => $triedStr);
+	}
+	$last['refused'] = $refused;
+	$last['tried']   = $triedStr;
+	return $last;
+}
+
+/**
+ * 手机/PC 客户端接口发一条回复：https://tieba.baidu.com/c/c/post/add（参数经 ksort + tiebaclient!!! 签名）。
+ * @param string $bduss 百度账号 BDUSS
+ * @param string $fid   贴吧 ID
+ * @param string $tbs   发帖签名 tbs
+ * @param string $kw    目标帖子所属贴吧名
+ * @param string $tid   目标帖子 ID
+ * @param string $water 回复内容
+ * @param int    $type  _client_type：1=iPhone 2=Android 3=WindowsPhone 4=Windows/Wap
+ * @return array ['status'=>'1' 成功；其他=错误码/'err'，'msg'=>说明, 'refused'=>bool]
+ */
+function wmzz_post_send_client($bduss, $fid, $tbs, $kw, $tid, $water, $type)
+{
+	$type = in_array($type, array(1, 2, 3, 4)) ? $type : 2;
 	$x = array(
-		'BDUSS'           => $ck,
+		'BDUSS'           => $bduss,
 		'_client_id'      => 'wappc_' . rand_int(10) . '_' . rand_int(3),
-		'_client_type'    => in_array($device, array(1, 2, 4)) ? $device : 2,
-		'_client_version' => '12.22.1.0',
+		'_client_type'    => $type,
+		'_client_version' => '12.95.1.0',
 		'_phone_imei'     => md5(rand_int(16)),
 		'content'         => $water,
 		'fid'             => $fid,
@@ -125,26 +214,106 @@ function wmzz_post_send($uid, $tid, $pid, $water = '', $device = 2, $kw = '', $f
 	));
 	@curl_setopt($c->conn, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2_0);
 	@curl_setopt($c->conn, CURLOPT_TIMEOUT, 30);
-	$c->addcookie('BDUSS=' . $ck);
-	$return = json_decode($c->post($x), true);
+	$c->addcookie('BDUSS=' . $bduss);
+	$rawBody = $c->post($x);
+	$http    = @curl_getinfo($c->conn, CURLINFO_HTTP_CODE);
 	$c->close();
+	wmzz_resp_log($http, (string)$rawBody); // 排查用：每次发帖的完整原始响应都落盘
+	$return = json_decode((string)$rawBody, true);
 	if (empty($return) || !is_array($return)) {
-		return array('status' => '-1', 'msg' => '发帖接口无响应，可能被贴吧风控拦截，请稍后再试');
+		return array('status' => '-1', 'msg' => '发帖接口无响应，可能被贴吧风控拦截，请稍后再试', 'refused' => true, 'err_type' => 'risk');
 	}
 	$code = isset($return['error_code']) ? $return['error_code'] : '';
-	if (isset($return['info']['need_vcode']) && $return['info']['need_vcode'] != '0' && ($code === '' || $code === '0' || $code === 0)) {
-		return array('status' => '-1', 'msg' => '本次回复需要输入验证码，已自动跳过');
+	if (isset($return['info']['need_vcode']) && $return['info']['need_vcode'] != '0'
+		&& ($code === '' || $code === '0' || $code === 0)) {
+		return array('status' => '-1', 'msg' => '本次回复需要验证码，已自动跳过', 'refused' => true, 'err_type' => 'risk');
 	}
 	if ($code !== '' && $code !== '0' && $code !== 0) {
 		$emsg = empty($return['error_msg']) ? '发送失败' : $return['error_msg'];
-		return array('status' => is_numeric($code) ? $code : '-1', 'msg' => $emsg);
+		return array('status' => is_numeric($code) ? $code : '-1', 'msg' => $emsg, 'refused' => true, 'err_type' => wmzz_err_type($code, $emsg));
 	}
-	return array('status' => '1', 'msg' => '');
+	return array('status' => '1', 'msg' => '', 'refused' => false, 'err_type' => '');
+}
+
+/**
+ * 网页(电脑/浏览器)通道发一条回复：https://tieba.baidu.com/f/commit/post/add
+ * 说明：贴吧移动客户端接口在账号触发风控后要求 AI 验证码(224011)，网页端实测同一账号状态无需验证码
+ *       (err_code=0 / vcode.need_vcode=0)。网页通道需要 BDUSS + STOKEN + tbs。
+ * @param string $bduss  百度账号 BDUSS
+ * @param string $stoken 百度账号 STOKEN（网页登录态必需）
+ * @param string $kw     目标帖子所属贴吧名
+ * @param string $fid    贴吧 ID
+ * @param string $tbs    发帖签名 tbs
+ * @param string $tid    目标帖子 ID
+ * @param string $water  回复内容
+ * @return array ['status'=>'1' 成功；其他=错误码/'err'，'msg'=>说明, 'refused'=>bool]
+ */
+function wmzz_post_send_web($bduss, $stoken, $kw, $fid, $tbs, $tid, $water)
+{
+	if ($bduss === '' || $stoken === '') {
+		return array('status' => '-1', 'msg' => '缺少 BDUSS/STOKEN，无法走网页发帖', 'refused' => false, 'err_type' => 'other');
+	}
+	$post = 'ie=utf-8&kw=' . rawurlencode($kw)
+		. '&fid=' . rawurlencode($fid)
+		. '&tid=' . rawurlencode($tid)
+		. '&tbs=' . rawurlencode($tbs)
+		. '&content=' . rawurlencode($water)
+		. '&rich_text=1&floor_num=1&basilisk=1&__type__=reply';
+	$headers = array(
+		'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+		'Content-Type: application/x-www-form-urlencoded',
+		'Referer: https://tieba.baidu.com/p/' . $tid,
+		'X-Requested-With: XMLHttpRequest'
+	);
+	$ch = curl_init('https://tieba.baidu.com/f/commit/post/add');
+	@curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+	@curl_setopt($ch, CURLOPT_POST, true);
+	@curl_setopt($ch, CURLOPT_POSTFIELDS, $post);
+	@curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+	@curl_setopt($ch, CURLOPT_COOKIE, 'BDUSS=' . $bduss . '; STOKEN=' . $stoken);
+	@curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+	@curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+	$raw  = curl_exec($ch);
+	$http = @curl_getinfo($ch, CURLINFO_HTTP_CODE);
+	curl_close($ch);
+	wmzz_resp_log($http, (string)$raw); // 排查用：每次发帖的完整原始响应都落盘
+	$j = json_decode((string)$raw, true);
+	if (!is_array($j)) {
+		return array('status' => '-1', 'msg' => '网页发帖接口无响应，可能被拦截', 'refused' => true, 'err_type' => 'risk');
+	}
+	$data = (isset($j['data']) && is_array($j['data'])) ? $j['data'] : array();
+	// 未登录 / STOKEN 失效：这属于登录态问题而非风控拒绝，交调度按“单目标稍后重试”处理
+	if (isset($data['is_login']) && $data['is_login'] != 1 && $data['is_login'] != '1') {
+		return array('status' => '-1', 'msg' => '网页发帖未登录（STOKEN 可能失效），请到云签到重新保存该贴吧账号', 'refused' => false, 'err_type' => 'other');
+	}
+	// 网页端偶发也要求验证码
+	if (isset($data['vcode']) && is_array($data['vcode']) && isset($data['vcode']['need_vcode'])
+		&& $data['vcode']['need_vcode'] != 0 && $data['vcode']['need_vcode'] != '0') {
+		return array('status' => '-1', 'msg' => '网页发帖需要验证码，请稍后再试', 'refused' => true, 'err_type' => 'risk');
+	}
+	$no    = isset($j['no']) ? $j['no'] : null;
+	$ecode = isset($j['err_code']) ? $j['err_code'] : null;
+	if (($no === 0 || $no === '0') && ($ecode === 0 || $ecode === '0')) {
+		return array('status' => '1', 'msg' => '', 'refused' => false, 'err_type' => '');
+	}
+	// 失败：尽量给出可读原因（网页端明确拒绝也计入“被拒”）
+	$emsg = '';
+	if (!empty($j['error']) && is_string($j['error'])) {
+		$emsg = $j['error'];
+	} elseif (!empty($data['autoMsg'])) {
+		$emsg = $data['autoMsg'];
+	} elseif (!empty($data['error']) && is_string($data['error'])) {
+		$emsg = $data['error'];
+	}
+	if ($emsg === '') {
+		$emsg = '网页发帖失败';
+	}
+	return array('status' => is_numeric($no) ? $no : '-1', 'msg' => $emsg, 'refused' => true, 'err_type' => wmzz_err_type($no, $emsg));
 }
 
 /**
  * 解析管理员后台的“发帖时间间隔”配置。
- * 新版为区间（sleep_min ~ sleep_max，秒）：每次自动回帖后，下一条会在区间内随机等待，每次都不同。
+ * 新版为区间（sleep_min ~ sleep_max，秒）：每次成功回帖后，下一条会在区间内随机等待，每次都不同。
  * 兼容旧版：
  *   - 老字段 sleep 仅曾用于“同批多条之间固定停顿”，新逻辑改为一次一条，不再使用该字段；
  *   - 新字段不存在、或两边都填 0/留空时，回落到内置默认随机窗口 60~180 秒（约 1~3 分钟），防止连发触发风控。
@@ -192,44 +361,146 @@ function wmzz_range_text($range)
 }
 
 /**
- * 把“今天仍有额度、已到期、但本轮没有处理”的目标，各自重排到“该账号固定底数 gap + 随机区间”之后的时刻。
- * 这样全局始终一次只回一条，且每条之间隔着随机间隔，互不扎堆。
- * @param int $except_id 本轮已处理的目标 id，跳过它
- * @param int $now       当前时间戳
- * @param int $rmin      随机区间最小值(秒)
- * @param int $rmax      随机区间最大值(秒)
- * @return int 被重排的目标数
+ * 读取一个全局开关值（options 表）。返回 null 表示不存在。
+ * @param string $name 设置名
+ * @return string|null
  */
-function wmzz_reschedule_due($except_id, $now, $rmin, $rmax)
+function wmzz_opt_read($name)
 {
 	global $m;
-	$rows = array();
-	$uids = array();
-	$q = $m->query('SELECT `id`, `uid` FROM `' . DB_PREFIX . 'wmzz_post_data` WHERE `remain` > 0 AND `try_ts` <= ' . intval($now) . ' AND `id` <> ' . intval($except_id));
-	if ($q) {
-		while ($o = $m->fetch_array($q)) {
-			$rows[] = array('id' => intval($o['id']), 'uid' => intval($o['uid']));
-			$uids[intval($o['uid'])] = true;
-		}
+	if (!is_object($m)) {
+		return null;
 	}
-	if (empty($rows)) {
-		return 0;
+	$q = $m->once_fetch_array("SELECT `value` FROM `" . DB_PREFIX . "options` WHERE `name` = '" . addslashes($name) . "' LIMIT 1;");
+	return (empty($q) || !isset($q['value'])) ? null : $q['value'];
+}
+
+/**
+ * 写入一个全局开关值（options 表，不存在则自动插入）。
+ * @param string $name  设置名
+ * @param mixed  $value 值
+ */
+function wmzz_opt_write($name, $value)
+{
+	global $m;
+	if (!is_object($m)) {
+		return;
 	}
-	// 预取每个账号的固定底数(gap，秒)
-	$gapmap = array();
-	$idlist = implode(',', array_keys($uids));
-	$gu = $m->query('SELECT `uid`, `gap` FROM `' . DB_PREFIX . 'wmzz_post` WHERE `uid` IN (' . $idlist . ')');
-	if ($gu) {
-		while ($g = $m->fetch_array($gu)) {
-			$gapmap[intval($g['uid'])] = intval($g['gap']);
-		}
+	$name  = addslashes($name);
+	$value = addslashes((string)$value);
+	@$m->query("INSERT INTO `" . DB_PREFIX . "options` (`name`, `value`) VALUES ('{$name}', '{$value}') ON DUPLICATE KEY UPDATE `value` = '{$value}';");
+}
+
+/**
+ * 读取全局“下次允许发包”时间戳（单位：秒）。
+ * 0 表示当前无约束（可立即发包）。任何帖子的两条回帖之间都必须隔开。
+ * @return int unix 秒
+ */
+function wmzz_gate_read()
+{
+	return intval(wmzz_opt_read('wmzz_post_gate'));
+}
+
+/**
+ * 写入全局“下次允许发包”时间戳。
+ * @param int $ts unix 秒；0 表示清除限制
+ */
+function wmzz_gate_write($ts)
+{
+	wmzz_opt_write('wmzz_post_gate', max(0, intval($ts)));
+}
+
+/**
+ * 读取全局“连续被拒次数”（各端都被接口拒绝才累计；成功一条即清零）。
+ * @return int
+ */
+function wmzz_fails_read()
+{
+	return intval(wmzz_opt_read('wmzz_post_fails'));
+}
+
+/**
+ * 写入全局“连续被拒次数”。
+ * @param int $n 次数
+ */
+function wmzz_fails_write($n)
+{
+	wmzz_opt_write('wmzz_post_fails', max(0, intval($n)));
+}
+
+/**
+ * 读取“本小时已成功条数”计数。值为 "YmdH:count"，跨小时自动归零。
+ * @return array{key:string,count:int}
+ */
+function wmzz_hour_read()
+{
+	$v = wmzz_opt_read('wmzz_post_hour');
+	if ($v === null || $v === '') {
+		return array('key' => '', 'count' => 0);
 	}
-	$n = 0;
-	foreach ($rows as $o) {
-		$base = isset($gapmap[$o['uid']]) ? $gapmap[$o['uid']] : 0;
-		$d    = $base + mt_rand($rmin, $rmax);
-		$m->query('UPDATE `' . DB_NAME . '`.`' . DB_PREFIX . 'wmzz_post_data` SET `try_ts` = ' . ($now + $d) . ' WHERE `id` = ' . $o['id'] . ' AND `remain` > 0 AND `try_ts` <= ' . $now);
-		$n++;
+	$p = explode(':', $v, 2);
+	return array('key' => isset($p[0]) ? $p[0] : '', 'count' => isset($p[1]) ? intval($p[1]) : 0);
+}
+
+/**
+ * 写入“本小时已成功条数”计数。
+ * @param string $key   YmdH
+ * @param int    $count 本小时成功条数
+ */
+function wmzz_hour_write($key, $count)
+{
+	wmzz_opt_write('wmzz_post_hour', $key . ':' . max(0, intval($count)));
+}
+
+/**
+ * 被拒后的递增随机退避（按用户自定义区间，分钟）。
+ * 将区间 [min,max] 等分为三段，随连续失败次数 n 逐段加大取值（都随机、不完全重复）：
+ *   - 第 1 次：取下限段（偏小），如 20~150 → 20~63 分钟区间随机；
+ *   - 第 2 次：取中段，如 63~107 分钟随机；
+ *   - 第 3 次及以上：取上限段（偏大），如 107~150 分钟随机，之后保持在大段内随机。
+ * @param int $n     连续被拒次数
+ * @param int $minMin 区间下限（分钟）
+ * @param int $maxMin 区间上限（分钟）
+ * @return int 秒
+ */
+function wmzz_backoff_sec($n, $minMin, $maxMin)
+{
+	$lo = max(0, intval($minMin));
+	$hi = max(0, intval($maxMin));
+	if ($lo <= 0 || $hi <= 0) {
+		$lo = 20; $hi = 150; // 未配置时的默认区间（分钟）
 	}
-	return $n;
+	if ($hi < $lo) {
+		$t = $hi; $hi = $lo; $lo = $t;
+	}
+	$n    = max(1, intval($n));
+	$seg  = max(1, intdiv($hi - $lo, 3));
+	if ($n == 1) {
+		$a = $lo;                 $b = min($hi, $lo + $seg);
+	} elseif ($n == 2) {
+		$a = min($hi, $lo + $seg); $b = min($hi, $lo + 2 * $seg);
+	} else {
+		$a = min($hi, $lo + 2 * $seg); $b = $hi;
+	}
+	if ($b < $a) { $b = $a; }
+	return mt_rand($a, $b) * 60;
+}
+
+/**
+ * 判断发帖失败的错误类型（用于区分“目标/账号级问题”与“风控”）。
+ * @param string $code 错误码
+ * @param string $msg  错误说明
+ * @return string 'notfound' 帖子不存在 | 'muted' 被禁言 | 'risk' 风控/验证码 | 'other' 其他
+ */
+function wmzz_err_type($code, $msg)
+{
+	$code = (string)$code;
+	$msg  = (string)$msg;
+	if ($code === '230273' || strpos($msg, '帖子不存在') !== false || strpos($msg, '不存在') !== false) {
+		return 'notfound';
+	}
+	if (strpos($msg, '禁言') !== false) {
+		return 'muted';
+	}
+	return 'risk';
 }
